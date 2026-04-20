@@ -1,3 +1,4 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -44,6 +45,15 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+export const CODEX_CONTAINER_IMAGE =
+  process.env.CODEX_CONTAINER_IMAGE || 'nanoclaw-codex-agent:latest';
+// Codex CLI may be installed on the Windows side (WSL), so check both paths.
+const WINDOWS_CODEX_HOME = process.env.CODEX_HOME_WINDOWS
+  || path.join('/mnt/c/Users', path.basename(HOME_DIR), '.codex');
+const LINUX_CODEX_HOME = path.join(HOME_DIR, '.codex');
+export const CODEX_HOME = fs.existsSync(LINUX_CODEX_HOME)
+  ? LINUX_CODEX_HOME
+  : WINDOWS_CODEX_HOME;
 export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,

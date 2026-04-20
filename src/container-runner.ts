@@ -7,6 +7,8 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CODEX_CONTAINER_IMAGE,
+  CODEX_HOME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -27,7 +29,7 @@ import {
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { AgentBackend, RegisteredGroup } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
@@ -135,55 +137,7 @@ function buildVolumeMounts(
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
-    );
-  }
-
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
-  mounts.push({
-    hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
-    readonly: false,
-  });
+  const backend: AgentBackend = group.agentBackend || 'claude';
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
@@ -197,38 +151,129 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
-    const needsCopy =
-      !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
-    if (needsCopy) {
-      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (backend === 'codex') {
+    // Mount host's ~/.codex/ for Codex CLI auth (OAuth tokens).
+    // Writable so the CLI can auto-refresh tokens.
+    // WARNING: refresh tokens are single-use rotating — only one Codex
+    // container should run at a time to avoid token invalidation.
+    if (fs.existsSync(CODEX_HOME)) {
+      mounts.push({
+        hostPath: CODEX_HOME,
+        containerPath: '/home/node/.codex',
+        readonly: false,
+      });
+    } else {
+      logger.warn(
+        { group: group.name, codexHome: CODEX_HOME },
+        'Codex home directory not found — run "codex login" on the host first',
+      );
     }
+
+    // Copy codex agent-runner source into a per-group writable location
+    const agentRunnerSrc = path.join(
+      projectRoot,
+      'container',
+      'agent-runner-codex',
+      'src',
+    );
+    const groupAgentRunnerDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      'agent-runner-codex-src',
+    );
+    if (fs.existsSync(agentRunnerSrc)) {
+      const srcIndex = path.join(agentRunnerSrc, 'index.ts');
+      const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+      const needsCopy =
+        !fs.existsSync(groupAgentRunnerDir) ||
+        !fs.existsSync(cachedIndex) ||
+        (fs.existsSync(srcIndex) &&
+          fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      if (needsCopy) {
+        fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      }
+    }
+    mounts.push({
+      hostPath: groupAgentRunnerDir,
+      containerPath: '/app/src',
+      readonly: false,
+    });
+  } else {
+    // Claude backend: per-group Claude sessions directory
+    const groupSessionsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+    );
+    fs.mkdirSync(groupSessionsDir, { recursive: true });
+    const settingsFile = path.join(groupSessionsDir, 'settings.json');
+    if (!fs.existsSync(settingsFile)) {
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify(
+          {
+            env: {
+              CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+              CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+              CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+    }
+
+    // Sync skills from container/skills/ into each group's .claude/skills/
+    const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+    const skillsDst = path.join(groupSessionsDir, 'skills');
+    if (fs.existsSync(skillsSrc)) {
+      for (const skillDir of fs.readdirSync(skillsSrc)) {
+        const srcDir = path.join(skillsSrc, skillDir);
+        if (!fs.statSync(srcDir).isDirectory()) continue;
+        const dstDir = path.join(skillsDst, skillDir);
+        fs.cpSync(srcDir, dstDir, { recursive: true });
+      }
+    }
+    mounts.push({
+      hostPath: groupSessionsDir,
+      containerPath: '/home/node/.claude',
+      readonly: false,
+    });
+
+    // Copy claude agent-runner source into a per-group writable location
+    const agentRunnerSrc = path.join(
+      projectRoot,
+      'container',
+      'agent-runner',
+      'src',
+    );
+    const groupAgentRunnerDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      'agent-runner-src',
+    );
+    if (fs.existsSync(agentRunnerSrc)) {
+      const srcIndex = path.join(agentRunnerSrc, 'index.ts');
+      const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+      const needsCopy =
+        !fs.existsSync(groupAgentRunnerDir) ||
+        !fs.existsSync(cachedIndex) ||
+        (fs.existsSync(srcIndex) &&
+          fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      if (needsCopy) {
+        fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      }
+    }
+    mounts.push({
+      hostPath: groupAgentRunnerDir,
+      containerPath: '/app/src',
+      readonly: false,
+    });
   }
-  mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
-  });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -246,6 +291,7 @@ function buildVolumeMounts(
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  backend: AgentBackend,
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
@@ -253,19 +299,25 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
+  if (backend === 'codex') {
+    // Codex uses OAuth tokens from ~/.codex/auth.json (mounted from host).
+    // No OneCLI gateway needed — Codex CLI handles auth internally.
+    args.push('-e', 'CODEX_HOME=/home/node/.codex');
   } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
+    // OneCLI gateway handles credential injection — containers never see real secrets.
+    // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
+    const onecliApplied = await onecli.applyContainerConfig(args, {
+      addHostMapping: false, // Nanoclaw already handles host gateway
+      agent: agentIdentifier,
+    });
+    if (onecliApplied) {
+      logger.info({ containerName }, 'OneCLI gateway config applied');
+    } else {
+      logger.warn(
+        { containerName },
+        'OneCLI gateway not reachable — container will have no credentials',
+      );
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -289,7 +341,7 @@ async function buildContainerArgs(
     }
   }
 
-  args.push(CONTAINER_IMAGE);
+  args.push(backend === 'codex' ? CODEX_CONTAINER_IMAGE : CONTAINER_IMAGE);
 
   return args;
 }
@@ -305,6 +357,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  const backend: AgentBackend = group.agentBackend || 'claude';
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
@@ -315,6 +368,7 @@ export async function runContainerAgent(
   const containerArgs = await buildContainerArgs(
     mounts,
     containerName,
+    backend,
     agentIdentifier,
   );
 
@@ -337,6 +391,7 @@ export async function runContainerAgent(
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      backend,
     },
     'Spawning container agent',
   );

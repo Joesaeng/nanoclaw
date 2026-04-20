@@ -27,6 +27,8 @@ export interface AllowedRoot {
   description?: string;
 }
 
+export type AgentBackend = 'claude' | 'codex';
+
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
@@ -40,6 +42,7 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  agentBackend?: AgentBackend; // Default: 'claude'
 }
 
 export interface NewMessage {
