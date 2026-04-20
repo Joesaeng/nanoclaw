@@ -1,0 +1,18 @@
+[Unit]
+Description=NanoClaw Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/splgames02/nanoclaw/dashboard
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+Environment=PORT=3000
+Environment=DB_PATH=/home/splgames02/nanoclaw/store/messages.db
+Environment=NANOCLAW_DIR=/home/splgames02/nanoclaw
+# 아래 토큰은 원하는 값으로 변경하세요
+Environment=DASHBOARD_TOKEN=nanoclaw-dashboard-2026
+
+[Install]
+WantedBy=default.target

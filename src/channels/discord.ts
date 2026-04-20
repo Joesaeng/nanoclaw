@@ -23,10 +23,12 @@ export class DiscordChannel implements Channel {
   private client: Client | null = null;
   private opts: DiscordChannelOpts;
   private botToken: string;
+  private jidPrefix: string;
 
-  constructor(botToken: string, opts: DiscordChannelOpts) {
+  constructor(botToken: string, opts: DiscordChannelOpts, jidPrefix: string = 'dc') {
     this.botToken = botToken;
     this.opts = opts;
+    this.jidPrefix = jidPrefix;
   }
 
   async connect(): Promise<void> {
@@ -40,11 +42,11 @@ export class DiscordChannel implements Channel {
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
-      // Ignore bot messages (including own)
-      if (message.author.bot) return;
+      // Ignore own messages only — allow other bots (e.g. teammate bot)
+      if (this.client?.user && message.author.id === this.client.user.id) return;
 
       const channelId = message.channelId;
-      const chatJid = `dc:${channelId}`;
+      const chatJid = `${this.jidPrefix}:${channelId}`;
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
       const senderName =
@@ -183,7 +185,7 @@ export class DiscordChannel implements Channel {
     }
 
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = jid.replace(/^dc[^:]*:/, '');
       const channel = await this.client.channels.fetch(channelId);
 
       if (!channel || !('send' in channel)) {
@@ -213,7 +215,7 @@ export class DiscordChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.startsWith('dc:');
+    return jid.startsWith(`${this.jidPrefix}:`);
   }
 
   async disconnect(): Promise<void> {
@@ -247,4 +249,12 @@ registerChannel('discord', (opts: ChannelOpts) => {
     return null;
   }
   return new DiscordChannel(token, opts);
+});
+
+registerChannel('discord2', (opts: ChannelOpts) => {
+  const envVars = readEnvFile(['DISCORD_BOT_TOKEN_2']);
+  const token =
+    process.env.DISCORD_BOT_TOKEN_2 || envVars.DISCORD_BOT_TOKEN_2 || '';
+  if (!token) return null;
+  return new DiscordChannel(token, opts, 'dc2');
 });
